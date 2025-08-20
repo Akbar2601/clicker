@@ -4,56 +4,50 @@ import streamlit as st
 
 st.set_page_config(page_title="Mini Clicker", page_icon="🖱️", layout="centered")
 
-BOT_USERNAME = st.secrets.get("put_in_coin_bot")  # например: my_clicker_bot (без @)
-BOT_TOKEN = st.secrets.get("8344313198:AAHr54FU1jw5mfiQ0MtL7pARle7ElZHGFx0")  # опционально, для валидации initData
+# Ключи читаем из Secrets (Streamlit → Manage app → Settings → Secrets)
+BOT_USERNAME = st.secrets.get("put_in_coin_bot")  # например: put_in_coin_bot (без @)
+BOT_TOKEN    = st.secrets.get("8344313198:AAHRR7gjXU7KDlg5ZzMyATMxvp2bHr1pT9k")              # опционально: для валидации initData
 
-# --- JS: читаем initData/Unsafe и один раз кладём в query-параметры ---
+# --- JS: читаем initData/Unsafe даже если Streamlit рендерит внутри iframe ---
 js_bootstrap = """
 <script>
 (function(){
   let tries = 0;
   function init(){
     tries++;
-    // Telegram API может быть только в родителе (из-за iframe Streamlit)
+
+    // Ищем API и в текущем окне, и у родителя (из-за iframe Streamlit)
     const W =
       (window.Telegram && window.Telegram.WebApp) ||
       (window.parent && window.parent.Telegram && window.parent.Telegram.WebApp);
 
     if (!W || !W.initDataUnsafe) {
-      if (tries < 40) return setTimeout(init, 150); // подождём до ~6 сек
+      if (tries < 40) return setTimeout(init, 150); // ждём до ~6 сек
       return;
     }
 
     try {
-      // Готовим веб-апп
       if (typeof W.ready === "function") W.ready();
 
       const url = new URL(window.location.href);
 
-      // Пакуем пользователя в tg_user_b64
       if (!url.searchParams.get("tg_user_b64")) {
         const u = W.initDataUnsafe.user || null;
         if (u) {
           const payload = {
-            id: u.id,
-            first_name: u.first_name || null,
-            last_name: u.last_name || null,
-            username: u.username || null,
-            language_code: u.language_code || null,
-            is_premium: u.is_premium || null,
-            photo_url: u.photo_url || null
+            id: u.id, first_name: u.first_name || null, last_name: u.last_name || null,
+            username: u.username || null, language_code: u.language_code || null,
+            is_premium: u.is_premium || null, photo_url: u.photo_url || null
           };
           const enc = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
           url.searchParams.set("tg_user_b64", enc);
         }
       }
 
-      // Кладём сырой initData (для подписи) в tg_init
       if (!url.searchParams.get("tg_init") && W.initData) {
         url.searchParams.set("tg_init", W.initData);
       }
 
-      // Один раз перезагружаем, чтобы Streamlit увидел параметры
       if (!sessionStorage.getItem("miniapp_init_done")) {
         sessionStorage.setItem("miniapp_init_done", "1");
         history.replaceState(null, "", url.toString());
@@ -67,13 +61,12 @@ js_bootstrap = """
 })();
 </script>
 """
-
 st.components.v1.html(js_bootstrap, height=0)
 
 # --- Парсинг query-параметров ---
 params = st.experimental_get_query_params()
 user_b64 = (params.get("tg_user_b64") or [None])[0]
-tg_init = (params.get("tg_init") or [None])[0]
+tg_init  = (params.get("tg_init") or [None])[0]
 
 def parse_user():
   if not user_b64:
@@ -84,7 +77,7 @@ def parse_user():
     return None
 
 def validate_init_data(init_data: str) -> bool:
-  """Официальная валидация initData (https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app)"""
+  """Валидация initData: https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app"""
   if not (init_data and BOT_TOKEN):
     return False
   try:
@@ -137,7 +130,7 @@ with colB:
   if st.button("Сброс"): st.session_state.score = 0
 st.metric("Счёт", st.session_state.score)
 
-# Отправка результата в Telegram
+# Отправка результата в Telegram (API берём из окна или родителя)
 payload = {
   "type": "clicker_result",
   "score": st.session_state.score,
@@ -149,13 +142,15 @@ payload_str = json.dumps(payload).replace("'", "\\'")
 send_js = f"""
 <script>
 (function(){{
+  const getW = () => (
+    (window.Telegram && window.Telegram.WebApp) ||
+    (window.parent && window.parent.Telegram && window.parent.Telegram.WebApp)
+  );
   const send = () => {{
-    try {{
-      const W = window.Telegram && window.Telegram.WebApp;
-      if (!W || !W.sendData) return alert("Откройте внутри Telegram, чтобы отправить результат.");
-      W.sendData('{payload_str}');
-      try {{ W.close(); }} catch(e) {{}}
-    }} catch(e) {{ alert("Ошибка: "+e); }}
+    const W = getW();
+    if (!W || !W.sendData) return alert("Откройте внутри Telegram, чтобы отправить результат.");
+    W.sendData('{payload_str}');
+    try {{ W.close(); }} catch(e) {{}}
   }};
   const hook = () => {{
     const btn = document.getElementById("sendToTelegramBtn");
@@ -170,4 +165,3 @@ st.divider()
 st.write("Готово? Отправьте результат боту:")
 st.markdown('<button id="sendToTelegramBtn" style="padding:.7rem 1.2rem;border-radius:.7rem;border:1px solid #ddd;cursor:pointer;">Отправить в Telegram</button>', unsafe_allow_html=True)
 st.components.v1.html(send_js, height=0)
-
