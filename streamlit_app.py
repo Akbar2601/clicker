@@ -11,40 +11,63 @@ BOT_TOKEN = st.secrets.get("8344313198:AAHr54FU1jw5mfiQ0MtL7pARle7ElZHGFx0")  # 
 js_bootstrap = """
 <script>
 (function(){
-  try {
-    const url = new URL(window.location.href);
-    if (!url.searchParams.get("tg_user_b64")) {
-      const W = window.Telegram && window.Telegram.WebApp;
-      if (W && W.initDataUnsafe) {
+  let tries = 0;
+  function init(){
+    tries++;
+    // Telegram API может быть только в родителе (из-за iframe Streamlit)
+    const W =
+      (window.Telegram && window.Telegram.WebApp) ||
+      (window.parent && window.parent.Telegram && window.parent.Telegram.WebApp);
+
+    if (!W || !W.initDataUnsafe) {
+      if (tries < 40) return setTimeout(init, 150); // подождём до ~6 сек
+      return;
+    }
+
+    try {
+      // Готовим веб-апп
+      if (typeof W.ready === "function") W.ready();
+
+      const url = new URL(window.location.href);
+
+      // Пакуем пользователя в tg_user_b64
+      if (!url.searchParams.get("tg_user_b64")) {
         const u = W.initDataUnsafe.user || null;
-        const payload = u ? {
-          id: u.id, first_name: u.first_name || null, last_name: u.last_name || null,
-          username: u.username || null, language_code: u.language_code || null,
-          is_premium: u.is_premium || null, photo_url: u.photo_url || null
-        } : null;
-        if (payload) {
+        if (u) {
+          const payload = {
+            id: u.id,
+            first_name: u.first_name || null,
+            last_name: u.last_name || null,
+            username: u.username || null,
+            language_code: u.language_code || null,
+            is_premium: u.is_premium || null,
+            photo_url: u.photo_url || null
+          };
           const enc = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
           url.searchParams.set("tg_user_b64", enc);
         }
       }
-    }
-    if (!url.searchParams.get("tg_init")) {
-      const W = window.Telegram && window.Telegram.WebApp;
-      if (W && W.initData) {
-        url.searchParams.set("tg_init", W.initData);  // строка initData для валидации на сервере
+
+      // Кладём сырой initData (для подписи) в tg_init
+      if (!url.searchParams.get("tg_init") && W.initData) {
+        url.searchParams.set("tg_init", W.initData);
       }
+
+      // Один раз перезагружаем, чтобы Streamlit увидел параметры
+      if (!sessionStorage.getItem("miniapp_init_done")) {
+        sessionStorage.setItem("miniapp_init_done", "1");
+        history.replaceState(null, "", url.toString());
+        location.reload();
+      }
+    } catch (e) {
+      console.log("MiniApp bootstrap error:", e);
     }
-    // Обновим URL и перезагрузим один раз, чтобы Streamlit увидел параметры
-    const prev = sessionStorage.getItem("miniapp_init_done");
-    if (!prev) {
-      sessionStorage.setItem("miniapp_init_done", "1");
-      window.history.replaceState(null, "", url.toString());
-      location.reload();
-    }
-  } catch(e) { console.log("bootstrap error", e); }
+  }
+  init();
 })();
 </script>
 """
+
 st.components.v1.html(js_bootstrap, height=0)
 
 # --- Парсинг query-параметров ---
@@ -147,3 +170,4 @@ st.divider()
 st.write("Готово? Отправьте результат боту:")
 st.markdown('<button id="sendToTelegramBtn" style="padding:.7rem 1.2rem;border-radius:.7rem;border:1px solid #ddd;cursor:pointer;">Отправить в Telegram</button>', unsafe_allow_html=True)
 st.components.v1.html(send_js, height=0)
+
