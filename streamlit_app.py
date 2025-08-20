@@ -1,39 +1,40 @@
-import base64, json, hmac, hashlib, time
+import base64, json, hmac, hashlib, time, urllib.request, urllib.parse
 import streamlit as st
 
 st.set_page_config(page_title="Mini Clicker", page_icon="🖱️", layout="centered")
 
-# Секреты в Streamlit (Manage app → Settings → Secrets)
-BOT_USERNAME = st.secrets.get("put_in_coin_bot")  # например: put_in_coin_bot
-BOT_TOKEN    = st.secrets.get("8344313198:AAHRR7gjXU7KDlg5ZzMyATMxvp2bHr1pT9k")              # для валидации initData (опционально)
+# Секреты Streamlit (Manage app → Settings → Secrets)
+BOT_USERNAME = st.secrets.get("put_in_coin_bot")  # например: put_in_coin_bot (без @)
+BOT_TOKEN    = st.secrets.get("8344313198:AAHRR7gjXU7KDlg5ZzMyATMxvp2bHr1pT9k")              # нужен для аватарки и серверного фолбэка
 
-# --- 1) Сначала пробуем прочитать user прямо из query (бот его туда положил) ---
+# ---------- 1) Читаем user, переданный ботом через query ----------
 params = st.experimental_get_query_params()
 user_from_bot = {
-    "id": int(params["id"][0]) if "id" in params else None,
+    "id": int(params["id"][0]) if "id" in params and params["id"][0].isdigit() else None,
     "first_name": params.get("first_name", [None])[0],
-    "last_name": params.get("last_name", [None])[0],
-    "username": params.get("username", [None])[0],
-    "photo_url": None,  # фото пока нет (см. примечание ниже)
+    "last_name":  params.get("last_name",  [None])[0],
+    "username":   params.get("username",   [None])[0],
+    "photo_url":  None,  # заполнится позже, если достанем через Bot API
 }
 
-# --- 2) Затем пробуем добрать user/initData через Telegram WebApp SDK (если доступен в WebView) ---
+# ---------- 2) Подтягиваем user/initData через Telegram WebApp SDK (если доступен в WebView) ----------
 js_bootstrap = """
 <script>
 (function(){
-  // Подключим официальный SDK (на случай отсутствия)
+  // Подключаем SDK (если нет)
   if (!window.Telegram || !window.Telegram.WebApp) {
     var s = document.createElement('script');
     s.src = "https://telegram.org/js/telegram-web-app.js";
     document.head.appendChild(s);
   }
 
-  let tries = 0;
   function getWebApp(){
     return (window.Telegram && window.Telegram.WebApp) ||
            (window.parent && window.parent.Telegram && window.parent.Telegram.WebApp) ||
            (window.top && window.top.Telegram && window.top.Telegram.WebApp) || null;
   }
+
+  let tries = 0;
   function init(){
     tries++;
     const W = getWebApp();
@@ -61,6 +62,7 @@ js_bootstrap = """
       if (!url.searchParams.get("tg_init") && W.initData) {
         url.searchParams.set("tg_init", W.initData);
       }
+
       if (!sessionStorage.getItem("miniapp_init_done")) {
         sessionStorage.setItem("miniapp_init_done", "1");
         history.replaceState(null, "", url.toString());
@@ -74,7 +76,7 @@ js_bootstrap = """
 """
 st.components.v1.html(js_bootstrap, height=0)
 
-# Читаем то, что дополнительно мог положить JS
+# Читаем то, что добавил JS
 params = st.experimental_get_query_params()
 user_b64 = (params.get("tg_user_b64") or [None])[0]
 tg_init  = (params.get("tg_init") or [None])[0]
@@ -101,10 +103,54 @@ def validate_init_data(init_data: str) -> bool:
 tg_user_js = parse_tg_user_b64(user_b64)
 is_valid   = validate_init_data(tg_init)
 
-# Выбираем источник user: JS > бот > None
+# Источник user: сначала JS (если есть), иначе — из бота
 tg_user = tg_user_js or (user_from_bot if user_from_bot["id"] else None)
 
-# --- UI ---
+# ---------- 3) Достаём аватар серверно через Bot API (без токена в браузере) ----------
+def fetch_avatar_data_url(user_id: int) -> str | None:
+    """
+    Возвращает data:URL с аватаркой пользователя (jpeg/png) или None.
+    Требует BOT_TOKEN и факт чата пользователя с ботом.
+    """
+    if not (BOT_TOKEN and user_id): 
+        return None
+    try:
+        # getUserProfilePhotos
+        api = f"https://api.telegram.org/bot{BOT_TOKEN}/getUserProfilePhotos?user_id={user_id}&limit=1"
+        with urllib.request.urlopen(api, timeout=8) as r:
+            info = json.loads(r.read().decode("utf-8"))
+        if not info.get("ok") or info.get("result", {}).get("total_count", 0) == 0:
+            return None
+
+        photos = info["result"]["photos"][0]  # sizes
+        best = max(photos, key=lambda p: p.get("file_size", 0))  # самый большой size
+        file_id = best["file_id"]
+
+        # getFile
+        api2 = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={urllib.parse.quote(file_id)}"
+        with urllib.request.urlopen(api2, timeout=8) as r2:
+            finfo = json.loads(r2.read().decode("utf-8"))
+        if not finfo.get("ok"):
+            return None
+        file_path = finfo["result"]["file_path"]
+
+        # download bytes
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        with urllib.request.urlopen(file_url, timeout=12) as img:
+            data = img.read()
+        b64 = base64.b64encode(data).decode("ascii")
+        # по расширению прикинем mime
+        mime = "image/jpeg"
+        if file_path.lower().endswith(".png"): mime = "image/png"
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        return None
+
+avatar_data_url = None
+if tg_user and not tg_user.get("photo_url"):
+    avatar_data_url = fetch_avatar_data_url(tg_user.get("id"))
+
+# ---------- 4) UI ----------
 st.title("Mini Clicker 🖱️")
 st.caption("Streamlit MiniApp для Telegram")
 
@@ -117,8 +163,9 @@ else:
         st.subheader("Ваш профиль")
         col1, col2 = st.columns([1,4], vertical_alignment="center")
         with col1:
-            if tg_user.get("photo_url"):
-                st.markdown(f'<img src="{tg_user["photo_url"]}" style="width:72px;height:72px;border-radius:50%;object-fit:cover"/>', unsafe_allow_html=True)
+            pic = tg_user.get("photo_url") or avatar_data_url
+            if pic:
+                st.markdown(f'<img src="{pic}" style="width:72px;height:72px;border-radius:50%;object-fit:cover"/>', unsafe_allow_html=True)
             else:
                 initials = (tg_user.get("first_name") or "?")[:1]
                 st.markdown(f'''
@@ -141,43 +188,60 @@ with colB:
     if st.button("Сброс"): st.session_state.score = 0
 st.metric("Счёт", st.session_state.score)
 
-# Отправка результата боту
+# ---------- 5) Кнопка отправки результата: JS + ФОЛБЭК ----------
 payload = {
     "type": "clicker_result",
     "score": st.session_state.score,
     "user_id": tg_user.get("id") if tg_user else None,
     "ts": int(time.time())
 }
-payload_str = json.dumps(payload).replace("'", "\\'")
+payload_json = json.dumps(payload).replace("</", "<\\/")  # безопасно для <script>
 
-send_js = f"""
+# HTML-кнопка полностью внутри компонента — кликается всегда.
+html_block = f"""
+<div style="margin-top:12px">
+  <button id="sendToTelegramBtn" style="padding:.7rem 1.2rem;border-radius:.7rem;border:1px solid #ddd;cursor:pointer;">
+    Отправить в Telegram
+  </button>
+</div>
 <script>
 (function(){{
+  // helper
   function getWebApp(){{
     return (window.Telegram && window.Telegram.WebApp) ||
            (window.parent && window.parent.Telegram && window.parent.Telegram.WebApp) ||
            (window.top && window.top.Telegram && window.top.Telegram.WebApp) || null;
   }}
-  const send = () => {{
+  function send(){{
     const W = getWebApp();
-    if (!W || !W.sendData) return alert("Откройте внутри Telegram, чтобы отправить результат.");
-    W.sendData('{payload_str}');
-    try {{ W.close(); }} catch(e) {{}}
-  }};
-  const hook = () => {{
-    const btn = document.getElementById("sendToTelegramBtn");
-    if (btn && !btn.__hooked) {{ btn.__hooked = true; btn.addEventListener("click", send); }}
-    else setTimeout(hook, 300);
-  }};
-  hook();
+    if (!W || !W.sendData) {{
+      alert("Откройте внутри Telegram, чтобы отправить результат.");
+      return;
+    }}
+    try {{
+      const payload = {payload_json};
+      W.sendData(JSON.stringify(payload));
+      try {{ W.close(); }} catch(e) {{}}
+    }} catch(e) {{
+      alert("Ошибка: " + e);
+    }}
+  }}
+  const btn = document.getElementById("sendToTelegramBtn");
+  if (btn) btn.addEventListener("click", send);
 }})();
 </script>
 """
-st.divider()
-st.write("Готово? Отправьте результат боту:")
-st.markdown('<button id="sendToTelegramBtn" style="padding:.7rem 1.2rem;border-radius:.7rem;border:1px solid #ddd;cursor:pointer;">Отправить в Telegram</button>', unsafe_allow_html=True)
-st.components.v1.html(send_js, height=0)
+st.components.v1.html(html_block, height=80)
 
-# Примечание: аватар
-# Чтобы безопасно показывать аватар, лучше получить его на стороне бота (getUserProfilePhotos + getFile),
-# скачать байты и отдать с вашего бэкенда/прокси (без токена в URL). Для MVP оставили инициалы.
+# Серверный фолбэк: на случай, если JS/SDK недоступен (придёт обычное сообщение, не web_app_data)
+if tg_user and BOT_TOKEN:
+    if st.button("Отправить результат (фолбэк)"):
+        try:
+            text = f"Fallback result: {json.dumps(payload, ensure_ascii=False)}"
+            api = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+            data = urllib.parse.urlencode({"chat_id": tg_user["id"], "text": text}).encode("utf-8")
+            with urllib.request.urlopen(urllib.request.Request(api, data=data), timeout=8) as r:
+                r.read()
+            st.success("Отправлено сообщением боту ✅")
+        except Exception as e:
+            st.error(f"Не удалось отправить серверно: {e}")
