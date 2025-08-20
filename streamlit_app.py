@@ -7,7 +7,7 @@ st.set_page_config(page_title="Mini Clicker", page_icon="🖱️", layout="cente
 BOT_USERNAME = st.secrets.get("put_in_coin_bots")  # напр.: put_in_coin_bot (без @)
 BOT_TOKEN    = st.secrets.get("8344313198:AAHRR7gjXU7KDlg5ZzMyATMxvp2bHr1pT9k")              # обязателен для аватара и отправки результата
 
-# === 1) user из query (бот прокидывает ?id&first_name&last_name&username) ===
+# ============ 1) user из query (бот добавляет ?id&first_name&last_name&username) ============
 params = st.experimental_get_query_params()
 user_from_bot = {
     "id": int(params["id"][0]) if "id" in params and params["id"][0].isdigit() else None,
@@ -17,7 +17,7 @@ user_from_bot = {
     "photo_url":  None,
 }
 
-# === 2) Пытаемся получить user через Telegram JS (если вдруг доступен) ===
+# ============ 2) пробуем достать user через Telegram WebApp SDK (если доступен) ============
 js_bootstrap = """
 <script>
 (function(){
@@ -70,7 +70,7 @@ js_bootstrap = """
 """
 st.components.v1.html(js_bootstrap, height=0)
 
-# Читаем то, что мог положить JS
+# читаем то, что мог положить JS
 params = st.experimental_get_query_params()
 user_b64 = (params.get("tg_user_b64") or [None])[0]
 tg_init  = (params.get("tg_init") or [None])[0]
@@ -97,26 +97,25 @@ def validate_init_data(init_data: str) -> bool:
 tg_user_js = parse_tg_user_b64(user_b64)
 is_valid   = validate_init_data(tg_init)
 
-# Итоговый user: сначала JS, потом — из бота
+# итоговый пользователь
 tg_user = tg_user_js or (user_from_bot if user_from_bot["id"] else None)
 
-# === 3) Аватар через Bot API ===
+# ============ 3) аватар через Bot API ============
 def fetch_avatar_data_url(user_id: int) -> str | None:
     if not (BOT_TOKEN and user_id): 
         return None
     try:
-        # getUserProfilePhotos
+        # 3.1 getUserProfilePhotos
         api = f"https://api.telegram.org/bot{BOT_TOKEN}/getUserProfilePhotos?user_id={user_id}&limit=1"
         with urllib.request.urlopen(api, timeout=8) as r:
             info = json.loads(r.read().decode("utf-8"))
         if not info.get("ok") or info.get("result", {}).get("total_count", 0) == 0:
-            return None  # у пользователя нет фото или приватность
-
+            return None
         photos = info["result"]["photos"][0]
         best = max(photos, key=lambda p: p.get("file_size", 0))
         file_id = best["file_id"]
 
-        # getFile
+        # 3.2 getFile
         api2 = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={urllib.parse.quote(file_id)}"
         with urllib.request.urlopen(api2, timeout=8) as r2:
             finfo = json.loads(r2.read().decode("utf-8"))
@@ -124,7 +123,7 @@ def fetch_avatar_data_url(user_id: int) -> str | None:
             return None
         file_path = finfo["result"]["file_path"]
 
-        # download bytes
+        # 3.3 download
         file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
         with urllib.request.urlopen(file_url, timeout=12) as img:
             data = img.read()
@@ -139,7 +138,15 @@ avatar_data_url = None
 if tg_user and not tg_user.get("photo_url"):
     avatar_data_url = fetch_avatar_data_url(tg_user.get("id"))
 
-# === 4) UI ===
+# ============ 4) DEBUG-панель (помогает сразу понять проблему) ============
+with st.sidebar:
+    st.write("**Debug**")
+    st.write("has_token:", bool(BOT_TOKEN))
+    st.write("user_from_bot:", bool(user_from_bot["id"]))
+    st.write("user_from_js:", bool(tg_user_js))
+    st.write("avatar_fetched:", bool(avatar_data_url))
+
+# ============ 5) UI ============
 st.title("Mini Clicker 🖱️")
 st.caption("Streamlit MiniApp для Telegram")
 
@@ -177,7 +184,7 @@ with colB:
     if st.button("Сброс"): st.session_state.score = 0
 st.metric("Счёт", st.session_state.score)
 
-# === 5) Отправка результата боту ЧЕРЕЗ BOT API (надёжно, без WebApp SDK) ===
+# ============ 6) Отправка результата через Bot API ============
 payload = {
     "type": "clicker_result",
     "score": st.session_state.score,
@@ -185,8 +192,12 @@ payload = {
     "ts": int(time.time())
 }
 st.divider()
-if tg_user and BOT_TOKEN:
-    if st.button("Отправить результат боту"):
+if st.button("Отправить результат боту"):
+    if not BOT_TOKEN:
+        st.error("В Secrets нет BOT_TOKEN. Задай в Settings → Secrets.")
+    elif not tg_user or not tg_user.get("id"):
+        st.error("Нет chat_id. Открой MiniApp из бота (кнопкой).")
+    else:
         try:
             text = json.dumps(payload, ensure_ascii=False)
             api = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -196,5 +207,3 @@ if tg_user and BOT_TOKEN:
             st.success("✅ Отправлено сообщением боту")
         except Exception as e:
             st.error(f"Не удалось отправить: {e}")
-else:
-    st.info("Чтобы отправить результат, нужен chat_id (откройте приложение из бота) и BOT_TOKEN в Secrets.")
